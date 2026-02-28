@@ -2,6 +2,7 @@ from io import BytesIO
 import json
 import re
 import secrets
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, UploadFile, File, Form, HTTPException, Query, status
@@ -88,6 +89,34 @@ def _extract_text_segments(file_bytes: bytes, filename: str | None) -> list[dict
         "page_start": 1,
         "page_end": 1,
     }]
+
+
+def _filename_from_url(file_url: str) -> str:
+    parsed = urlparse(file_url)
+    name = unquote(parsed.path.rsplit("/", 1)[-1]).strip()
+    return name or "remote-file"
+
+
+async def _fetch_remote_file(file_url: str) -> tuple[bytes, str, str]:
+    normalized_url = (file_url or "").strip()
+    parsed = urlparse(normalized_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="file_url must be a valid http or https URL.")
+
+    try:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            response = await client.get(normalized_url)
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to fetch file from URL (HTTP {exc.response.status_code}).",
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Failed to fetch file from URL.") from exc
+
+    content_type = (response.headers.get("content-type") or "application/octet-stream").split(";", 1)[0].strip()
+    return response.content, _filename_from_url(normalized_url), content_type or "application/octet-stream"
 
 
 def _split_text_units(text: str) -> list[str]:
@@ -839,33 +868,57 @@ def swagger_ui(_username: str = Depends(require_basic_auth)):
         title=f"{app.title} - Swagger UI",
     )
 
+
 @app.post("/ingest-file")
-async def ingest_file(file: UploadFile = File(...), source_id: str | None = Form(None)):
-    file_bytes = await file.read()
-    segments = _extract_text_segments(file_bytes, file.filename)
+async def ingest_file(
+    file: UploadFile | None = File(None),
+    file_url: str | None = Form(None),
+    source_id: str | None = Form(None),
+):
+    normalized_file_url = file_url.strip() if file_url and file_url.strip() else None
+    if file and normalized_file_url:
+        raise HTTPException(status_code=400, detail="Provide either file or file_url, not both.")
+    if not file and not normalized_file_url:
+        raise HTTPException(status_code=400, detail="Provide either file or file_url.")
+
+    source_url = None
+    if file:
+        file_bytes = await file.read()
+        filename = file.filename or "uploaded-file"
+        file_type = file.content_type or "application/octet-stream"
+    else:
+        source_url = normalized_file_url
+        file_bytes, filename, file_type = await _fetch_remote_file(source_url)
+
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="File is empty.")
+
+    segments = _extract_text_segments(file_bytes, filename)
     if not segments:
         raise HTTPException(status_code=400, detail="File does not contain extractable text.")
 
     text = "\n".join(segment["text"] for segment in segments)
     chunks, chunk_page_metadatas = _build_chunks(segments)
     embs = await embed_texts(chunks)
-    source_title = await _generate_document_title(text, file.filename)
+    source_title = await _generate_document_title(text, filename)
     resolved_source_id = source_id.strip() if source_id and source_id.strip() else _slugify(source_title)
     summary = await _generate_document_summary(text)
     tags = await _generate_document_tags(text)
     document_metadata = {
-        "filename": file.filename,
-        "file_type": file.content_type or "application/octet-stream",
+        "filename": filename,
+        "file_type": file_type,
         "file_size_bytes": len(file_bytes),
         "page_count": max(segment["page_end"] for segment in segments),
         "source_title": source_title,
         "summary": summary,
         "tags": tags,
     }
+    if source_url:
+        document_metadata["source_url"] = source_url
     chunk_metadatas = []
     for page_metadata in chunk_page_metadatas:
         chunk_metadatas.append({
-            "filename": file.filename,
+            "filename": filename,
             "page_start": page_metadata["page_start"],
             "page_end": page_metadata["page_end"],
         })

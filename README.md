@@ -133,12 +133,15 @@ Upload dokumen lalu simpan hasil chunk + embedding ke database.
 
 Form field:
 - `file`: file yang akan di-ingest
+- `file_url`: opsional, URL `http`/`https` ke file yang akan di-ingest
 - `source_id`: opsional, id unik dokumen. Jika tidak dikirim, akan dibuat dari judul AI
 
 Catatan:
+- Kirim salah satu: `file` atau `file_url`
 - PDF akan diekstrak teksnya dengan `pypdf`
 - File non-PDF akan dibaca sebagai teks UTF-8
 - Metadata dokumen menyimpan `filename`, `file_type`, `file_size_bytes`, `page_count`, `source_title`, dan `summary`
+- Jika ingest via URL, metadata dokumen juga menyimpan `source_url`
 - Tag dokumen akan digenerate otomatis oleh AI dan disimpan di metadata `document`
 - Summary dokumen akan digenerate otomatis oleh AI agar lebih mudah mengidentifikasi dokumen yang relevan
 - Metadata chunk menyimpan informasi halaman (`page_start`, `page_end`) agar hasil retrieval bisa ditelusuri ke halaman sumber
@@ -150,6 +153,14 @@ Contoh:
 ```bash
 curl -u basic:auth -X POST http://localhost:8248/ingest-file \
   -F "file=@./file.pdf" \
+  -F "source_id=my-doc"
+```
+
+Atau dari URL file:
+
+```bash
+curl -u basic:auth -X POST http://localhost:8248/ingest-file \
+  -F "file_url=https://example.com/file.pdf" \
   -F "source_id=my-doc"
 ```
 
