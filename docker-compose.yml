@@ -1,0 +1,13 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agentic-rag-app
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql+psycopg://rag:rag@172.17.0.1:5432/ragdb}
+    ports:
+      - "8248:8248"
+    restart: unless-stopped
